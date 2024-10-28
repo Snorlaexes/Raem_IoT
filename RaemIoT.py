@@ -13,6 +13,7 @@ import threading
 import board
 import neopixel
 from AudioPlayer import AudioPlayer
+from LEDController import LEDController
 
 try:
     from gi.repository import GObject  # python3
@@ -20,6 +21,8 @@ except ImportError:
     import gobject as GObject  # python2
 
 mainloop = None
+player = None
+ledController = None
 
 BLUEZ_SERVICE_NAME = 'org.bluez'
 LE_ADVERTISING_MANAGER_IFACE = 'org.bluez.LEAdvertisingManager1'
@@ -384,6 +387,7 @@ class LEDCharacteristic(Characteristic):
         self.green = 0.00
     
     def WriteValue(self, value, options):
+        global ledController
         txt = bytes(value).decode('utf-8')
         print(f"As text: {txt}")
         if "," in txt:
@@ -391,10 +395,13 @@ class LEDCharacteristic(Characteristic):
             self.red = float(colorValues[0])
             self.green = float(colorValues[1])
             self.blue = float(colorValues[2])
-            controllerLED(self.red, self.green, self.blue)
+            
+            ledController.start()
+            if ledController is not None:
+                ledController.update_color(self.red, self.green, self.blue, -1)
         else:
-            controllerLED(0, 0, 0)
-            shutdown(5)
+            if ledController is not None:
+                ledController.stop()
  
 class AudioService(Service):
     AUDIO_SVC_UUID = '123e4567-e89b-12d3-a456-426614175000'
@@ -418,6 +425,7 @@ class AudioOnCharacteristic(Characteristic):
         self.volume = 0
     
     def WriteValue(self, value, options):
+        global player
         txt = bytes(value).decode('utf-8')
         print(f"As text: {txt}")
         if "," in txt:
@@ -429,9 +437,14 @@ class AudioOnCharacteristic(Characteristic):
                 self.file_path = f'./Alarm/{audioValues[0]}.wav'
                 
             self.volume = int(audioValues[1])
-            player.start_audio(self.file_path, self.volume)
+            
+            player.start()
+            if player is not None:
+                player.update_music(self.file_path, self.volume)
+            # time.sleep(4)
+            # player.stop_audio()
         else:
-            print("Wrong value in AidioOnCharacteristic")
+            print("Wrong value in AudioOnCharacteristic")
 
 class ChangeVolumeCharacteristic(Characteristic):
     CNG_VOL_CHRC_UUID = '123e4567-e89b-12d3-a456-426614175002'
@@ -445,13 +458,15 @@ class ChangeVolumeCharacteristic(Characteristic):
         self.volume = 0
     
     def WriteValue(self, value, options):
+        global player
         txt = bytes(value).decode('utf-8')
         print(f"As text: {txt}")
         if "," in txt:
             print("Wrong value in ChangeVolumeCharacteristic")
         else:
             self.volume = int(txt)
-            player.set_volume(self.volume)
+            if player is not None:
+                player.set_volume(self.volume)
 
 class AudioOffCharacteristic(Characteristic):
     AUDIO_OFF_CHRC_UUID = '123e4567-e89b-12d3-a456-426614175003'
@@ -464,10 +479,12 @@ class AudioOffCharacteristic(Characteristic):
                 service)
     
     def WriteValue(self, value, options):
+        global player
         print(value)
         txt = bytes(value).decode('utf-8')
         print(f"As text: {txt}")
-        player.stop_audio()
+        if player is not None:
+            player.stop()
 
 class AlarmService(Service):
     ALARM_SVC_UUID = '123e4567-e89b-12d3-a456-426614176000'
@@ -508,6 +525,7 @@ class AlarmOnCharacteristic(Characteristic):
             self.volume = int(audioValues[5])
 
             turnAlarmOn(self.radientSec, self.red, self.green, self.blue, self.file_path, self.volume)
+            
         else:
             print("Wrong value in AlarmOnCharacteristic")
 
@@ -524,37 +542,36 @@ class AlarmOffCharacteristic(Characteristic):
     def WriteValue(self, value, options):
         txt = bytes(value).decode('utf-8')
         print(f"As text: {txt}")
-        controllerLED(0, 0, 0)
-        player.stop_audio()
-
-def controllerLED(r, g, b):
-    print(f"Red value: {r}, Green Value: {g}, Blue Value: {b}")
-    pixels=neopixel.NeoPixel(board.D18, 30)
-    pixels.fill((r, g, b))
-    pixels.show()
+        turnAlarmOff()
 
 def turnAlarmOn(second, r, g, b, file_path, volume):
+    global player, ledController
     steps = second * 10
-    stepRed = r/steps
-    stepGreen = g/steps
-    stepBlue = b/steps
+    
+    ledController.start()
+    if ledController is not None:
+        ledController.update_color(r, g, b, steps)
 
-    currentRed, currentGreen, currentBlue = 0.0000, 0.0000, 0.0000
-    for i in range(steps):
-        print("hi")
-        currentRed += stepRed
-        currentGreen += stepGreen
-        currentBlue += stepBlue
+    time.sleep(second + 0.1) # led 켜질때까지 대기
+    
+    player.start()
+    if player is not None:
+        player.update_music(file_path, volume)
+    
 
-        controllerLED(currentRed, currentGreen, currentBlue)
+def turnAlarmOff():
+    global player, ledController
 
-        time.sleep(0.1)
-        
-    player.start_audio(file_path, volume)
+    if ledController is not None:
+        ledController.stop()
+    
+    if player is not None:
+        player.stop()
     
 
 def register_app_cb():
     print('GATT application registered')
+    print('-----------------------------------')
 
 
 def register_app_error_cb(error):
@@ -581,7 +598,7 @@ def shutdown(timeout):
 
 
 def main(timeout=0):
-    global mainloop, bus, player
+    global mainloop, bus, player, ledController
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
@@ -612,8 +629,9 @@ def main(timeout=0):
     service_manager.RegisterApplication(app.get_path(), {},
                                         reply_handler=register_app_cb,
                                         error_handler=register_app_error_cb)
-    player = AudioPlayer()
-
+    player = AudioPlayer.getInstance()
+    ledController = LEDController.getInstance()
+    
     if timeout > 0:
         threading.Thread(target=shutdown, args=(timeout,)).start()
     else:
